@@ -1,0 +1,255 @@
+---
+title: "Final Project"
+output: html_notebook
+---
+
+
+```{r}
+#to close all DB connections
+#lapply( dbListConnections( dbDriver( drv = "MySQL")), dbDisconnect)
+```
+
+LIBRARIES
+```{r}
+rm(list=ls())
+library(RMySQL)
+library(tm)
+library(ggplot2)
+library(reshape2)
+library(wordcloud)
+library(SnowballC)
+#library(RWeka)
+```
+
+
+RETRIEVAL OF THE DATA
+```{r}
+#Obtaining the data from the SQL database in the localhost network
+
+#Stablishing connection with database
+con <- dbConnect(MySQL(),user="root", password="root",dbname="yelp_db", host="localhost")
+#Disconnect from database
+on.exit(dbDisconnect(con))
+#Send a query to the database and capture the info
+rs <- dbSendQuery(con, "select review.id, stars, review.text, review.date, review.useful, review.funny, review.cool, business_id, review.user_id, fans
+from review left outer join user on review.user_id = user.id
+where business_id in   
+                  (select distinct business_ID  
+                   from category  
+                   where business_id in 
+                   	(select business_id 
+                   	 from category 
+                   	 where category like \"%estaurants\")
+                   	 and category like \"Mexican\") 
+        order by useful DESC
+        limit 100")
+#Put the obtained info into a dataframe
+data <- fetch(rs, n=100)
+#Adquire the information we are interested in: reviews and usefulness value
+data<-data.frame(doc_id=data$useful, text=data$text)
+#make this data into a dataframe
+data<-as.data.frame(data)
+```
+
+CORPUS CREATION
+```{r}
+#Create a dataframe source for the corpus: 1st col doc_id 2nd col text
+corpus <- DataframeSource(data)
+
+#Create a volatile corpus R object
+corpus <- VCorpus(corpus, readerControl = list(content="text", id="useful"))
+
+#how many values we have in the corpus
+length(corpus)
+
+#Access the info from the second review object within then corpus
+corpus[[2]]$content
+```
+
+CLEANING THE TEXT
+```{r}
+corpus.ng <- tm_map(corpus,removeWords,c(stopwords("en"),"i","we","was"))
+
+removeURL <- content_transformer(function(x) gsub("(f|ht)tp(s?)://\\S+", "", x, perl=T))
+corpus.ng <- tm_map(corpus.ng, removeURL)
+toSpace <- content_transformer(function (x , pattern ) gsub(pattern, " ", x))
+corpus.ng <- tm_map(corpus.ng, toSpace, "/")
+corpus.ng <- tm_map(corpus.ng, toSpace, "@")
+corpus.ng <- tm_map(corpus.ng, toSpace, "\\|")
+corpus.ng <- tm_map(corpus.ng, toSpace, "\n")
+#gsub("\\n", "", corpus.ng)
+
+
+corpus.ng <- tm_map(corpus.ng,removePunctuation)
+corpus.ng <- tm_map(corpus.ng,removeNumbers)
+corpus.ng <- tm_map(corpus.ng, content_transformer(tolower))
+corpus.ng <- tm_map(corpus.ng,removeWords,c(stopwords("en"),"i","we","was","were", "you", "see", "how", "each", "come", "back", "pretty", "when", "who", "your", "get", "because", "just", "gave", "going", "sure", "so", "what", "my", "have", "been", "yes", "s", "its", "can", "also", "food"))
+
+corpus.ng = tm_map(corpus.ng, removeWords, stopwords("en")) 
+head(lapply(corpus.ng, as.character))
+#lapply(corpus.ng, meta)
+#summary(corpus.ng)
+#str(corpus.ng)
+```
+
+
+TEXT DOCUMENT MATRIX/N-GRAM CREATION
+```{r}
+#UnigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 2, max = 2))
+UnigramTokenizer <-function(x) unlist(lapply(ngrams(words(x), 3), paste, collapse = " "), use.names = FALSE)
+tdm.unigram = TermDocumentMatrix(corpus.ng,control = list(tokenize = UnigramTokenizer))
+position<-tdm.unigram[tdm.unigram$dimnames$Terms[2],tdm.unigram$dimnames$Docs[5]]
+positionb<-tdm.unigram[tdm.unigram$dimnames$Terms[1],tdm.unigram$dimnames$Docs[1]]
+position$v
+positionb$v
+#str(tdm.unigram)
+(as.matrix(tdm.unigram))
+```
+
+TFIDF Analysis
+sources: https://rstudio-pubs-static.s3.amazonaws.com/118341_dacd8e7a963745eeacf25f96da52770e.html
+https://ethen8181.github.io/machine-learning/clustering_old/tf_idf/tf_idf.html
+
+```{r}
+#Check to see how it looks
+tf <- as.matrix(tdm.unigram) #terms are rows, columns are documents
+
+#Total frequency of each term
+freq=rowSums(as.matrix(tdm.unigram))
+
+#Calculate IDF values
+idf <- log( ncol(tf) / ( 1 + rowSums(tf != 0) ) ) 
+
+#Set up matrix multiplication for TF-IDF
+idf <- diag(idf)
+
+#Create TF-IDF
+tf_idf <- crossprod(tf, idf)
+colnames(tf_idf) <- rownames(tf)
+
+# Note that normalization is computed "row-wise". Normalization to reduce document length bias
+tf_idf <- tf_idf / sqrt( rowSums( tf_idf^2 ) )
+
+#Get the frequencies
+tfidffreq <- colSums(tf_idf)
+
+high.freq=tail(sort(tfidffreq),n=20)
+hfp.df=as.data.frame(sort(high.freq))
+hfp.df$names <- rownames(hfp.df) 
+
+ggplot(hfp.df, aes(reorder(names,-high.freq), high.freq)) +
+  geom_bar(stat="identity", fill = "blue") + 
+  xlab("Trigram") + ylab("Weight") +
+  ggtitle("Trigram Weight Plot - TF-IDF") + theme(axis.text.x=element_text(angle=45, hjust=1))
+
+```
+
+```{r}
+usefulWeight<-data.frame(matrix(ncol=2,nrow=tdm.unigram$nrow))
+#vector <- c(tdm.unigram$dimnames$Terms[i], i)
+#usefulWeight[i] = vector
+#str(usefulWeight)
+#TF <- tdm.unigram[tdm.unigram$dimnames$Terms[5],tdm.unigram$dimnames$Docs[10]]
+    #vvv <- as.numeric(TF$v)
+   # TF
+#vvv
+```
+
+
+CREATE THE USEFULNESS WEIGHTED DATA
+```{r}
+for (i in 1:tdm.unigram$nrow){
+  sum=0
+  for (j in 1:tdm.unigram$ncol){
+    TF <- tdm.unigram[tdm.unigram$dimnames$Terms[i],tdm.unigram$dimnames$Docs[j]]
+    vvv <- as.numeric(TF$v)
+    if(length(vvv)!=0){
+      score <- as.numeric(tdm.unigram$dimnames$Docs[j])
+      value <- vvv*score
+      sum <- sum+value
+    }
+  }
+  word <- tdm.unigram$dimnames$Terms[i]
+  vector <- c(word, sum)
+  usefulWeight[i,] = vector
+}
+names(usefulWeight) <- c("word", "weight")
+usefulWeight
+
+```
+
+FREQUENCY VARIABLE
+```{r}
+freq = sort(rowSums(as.matrix(tdm.unigram)),decreasing = TRUE)
+freq.df = data.frame(word=names(freq), freq=freq)
+head(freq.df, 20)
+```
+
+WORD CLOUD
+```{r}
+pal=brewer.pal(8,"Blues")
+pal=pal[-(1:3)]
+usefulWeight$weight <- as.numeric(usefulWeight$weight)
+usefulWeight$word <- as.factor(usefulWeight$word)
+
+wordcloud(usefulWeight$word,usefulWeight$weight,max.words=100,scale=c(1,.075),random.order = F, colors=pal)
+```
+
+CHANGE ORDER OF USEFULNESS
+```{r}
+usefulWeight <- usefulWeight[with(usefulWeight, order(-weight)),]
+head(usefulWeight, 20)
+```
+
+PLOT THE USEFUL WORDS
+```{r}
+ggplot(head(usefulWeight,15), aes(reorder(word,-weight), weight)) +
+  geom_bar(stat = "identity", fill = "blue") +
+  xlab("Trigrams") + ylab("Weight") +
+  ggtitle("Trigram Weight Plot - Useful Rating") + theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+UPDATED BAR CHART 
+```{r}
+#Before merging take the 50 highest frequencies
+#Get the not normalized frequencies tfidf
+#Create TF-IDF
+tfidffreq <- colSums(tf_idf)
+high.tfidffreq=tail(sort(tfidffreq),n=200)
+hftfidf.df=as.data.frame(sort(high.tfidffreq))
+hftfidf.df$names <- rownames(hftfidf.df) 
+#Change the row name
+colnames(hftfidf.df)[1]<-"TF-IDF"
+#Change the scale of TF-IDF
+maxVal<-max(hftfidf.df$`TF-IDF`)
+hftfidf.df$`TF-IDF`<-(hftfidf.df$`TF-IDF`)/maxVal
+
+
+#useful weight 20 values
+usefulWeight2 <- head(usefulWeight, 200)
+colnames(usefulWeight2)[2]<-"Useful Weight"
+#Change the scale of the weight
+maxVal<-max(usefulWeight2$`Useful Weight`)
+usefulWeight2$`Useful Weight`<-(usefulWeight2$`Useful Weight`) / maxVal
+
+#merge the 2 data frames Mango and wf
+BigWf <- merge(hftfidf.df, usefulWeight2, by.x="names", by.y="word")
+
+#Sort the data 
+BigWf <- BigWf[order(-BigWf$`TF-IDF`),]
+
+#Plot bar Chart
+library(reshape2)
+BigWf <- melt(BigWf)
+
+#reorder the data frame for a ordered graph
+
+ggplot(BigWf, aes(reorder(names,as.numeric(row.names(BigWf))),value, fill = variable)) +
+  geom_bar(stat="identity", width=.5, position = "dodge") + 
+  xlab("Terms") + ylab("Weight") +
+  ggtitle("Term Weight Plot") + theme(axis.text.x=element_text(angle=30, hjust=1))
+
+```
+
+
+

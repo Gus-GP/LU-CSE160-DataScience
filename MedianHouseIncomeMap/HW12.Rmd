@@ -1,0 +1,117 @@
+---
+title: "Fucking Map""
+---
+
+Load all the necessary libraries
+```{r}
+library(ggmap)
+library(mapproj)
+library(ggplot2)
+library(maptools)
+library(rgdal)
+library(rgeos)
+library(foreign) # needed for read.dbf()
+library(doBy) #needed for the county name portion 
+```
+
+Read the shapefile and put the info in a dataframe
+```{r}
+# read administrative boundaries                              
+setwd("/Users/gustavogrinsteins/Lehigh/CSE160/HW12")
+
+#New method to change the projection (Geographical coordinates)
+Mapito <- readOGR("Counties.shp", layer = "Counties")
+
+#(Change it to what google maps uses)
+correctMapito <- spTransform(Mapito, CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+
+# extract sequence of points and assign IDs to states
+myMapDf <- fortify(correctMapito)
+
+# interpret id variable as integer
+myMapDf$id <- as.numeric(myMapDf$id)
+```
+
+Read the detailed file with the info of each county and get rid of extra stuff
+
+```{r}
+db <- read.dbf("Counties.dbf")
+db$ID <- as.integer(rownames(db))-1
+```
+
+Plotting the raster image
+```{r}
+#Graphing the information
+map <- get_map(location = "NY", zoom = 6)
+#Start the google map figure (raster)
+m0 <- ggmap(map) + xlim(-80,-71) + ylim(40,45.5)
+m0
+```
+
+Plotting the shaded states by id
+
+```{r}
+m1 <- m0 + geom_polygon(aes(x=long, y=lat, group=group, fill=id), data=myMapDf, alpha=.7) + scale_fill_gradient(low="red", high="green")
+m1
+```
+
+Adding the county's borders
+
+```{r}
+m2 <- m1 + geom_path(aes(x=long, y=lat, group=group), data=myMapDf, color='black')
+m2
+```
+
+Adding the county name
+
+```{r}
+#This line gets all the id's and gives them coordinates
+txtVal <- summaryBy(long + lat ~ id, data=myMapDf, FUN=mean, keep.names=T)
+#This lines plots the text for each county name
+m3 <- m2 + geom_text(aes(x=long, y=lat, label=db[id+1,"NAME"]), data=txtVal, col="yellow", cex=2)
+m3
+```
+
+Obtain the income data
+```{r}
+#Getting median income info into db
+#Had to change St. Lawrence to St Lawrence
+householdIncome <- read.csv("/Users/gustavogrinsteins/Lehigh/CSE160/MedianHousholdIncome.csv", header=TRUE)
+#Clean Houshold Income
+householdIncome$Rank <- NULL
+#Insert this information in db
+CountyIncome <- merge(db, householdIncome, by.x="NAME", by.y="County")
+#Change the type of the income object
+CountyIncome$MedianHouseholdIncome <- as.numeric(CountyIncome$Median)
+```
+
+
+Merge this data into our plotting dataframe
+```{r}
+#Add the values to out plotting dataframe do not merge the data
+myMapDf <- merge(myMapDf, CountyIncome, by.x="id", by.y="ID", sort = FALSE)
+```
+
+Plot the shades according to the info
+```{r}
+#Graphing the information
+map <- get_map(location = "NY", zoom = 6)
+#Start the google map figure (raster)
+m0 <- ggmap(map) + xlim(-80,-71) + ylim(40,45.5)
+
+#Putting the shades
+m1 <- m0 + geom_polygon(aes(x=long, y=lat, group=group, fill=MedianHouseholdIncome), data=myMapDf, alpha=.7) + scale_fill_gradient(low="red", high="green")
+
+#Adding county's borders
+m2 <- m1 + geom_path(aes(x=long, y=lat, group=group), data=myMapDf, color='black')
+
+#Adding text values
+#This line gets all the id's and gives them coordinates
+txtVal <- summaryBy(long + lat ~ id, data=myMapDf, FUN=mean, keep.names=T)
+#This lines plots the text for each county name
+m3 <- m2 + geom_text(aes(x=long, y=lat, label=db[id+1,"NAME"]), data=txtVal, col="yellow", cex=2)
+
+m3
+```
+
+

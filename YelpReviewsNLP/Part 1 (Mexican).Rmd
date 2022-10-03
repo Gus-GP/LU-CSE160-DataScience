@@ -1,0 +1,222 @@
+---
+title: "Final Project"
+output: html_notebook
+---
+
+```{r}
+#to close all DB connections
+#lapply( dbListConnections( dbDriver( drv = "MySQL")), dbDisconnect)
+```
+
+LOAD LIBRARIES
+```{r}
+library(RMySQL)
+library(tm)
+library(ggplot2)
+library(reshape2)
+library(wordcloud)
+library(SnowballC)
+#library(RWeka) Problem loading this
+```
+
+RETRIEVAL OF THE DATA
+```{r}
+#Obtaining the data from the SQL database in the localhost network
+
+#Stablishing connection with database
+con <- dbConnect(MySQL(),user="root", password="root",dbname="yelp_db", host="localhost")
+#Disconnect from database
+on.exit(dbDisconnect(con))
+#Send a query to the database and capture the info
+rs <- dbSendQuery(con, "select review.id, stars, review.text, review.date, review.useful, review.funny, review.cool, business_id, review.user_id, fans
+from review left outer join user on review.user_id = user.id
+where business_id in   
+                  (select distinct business_ID  
+                   from category  
+                   where business_id in 
+                   	(select business_id 
+                   	 from category 
+                   	 where category like \"%estaurants\")
+                   	 and category like \"Indian\") 
+        order by useful DESC
+        limit 100")
+#Put the obtained info into a dataframe
+data <- fetch(rs, n=100)
+#Adquire the information we are interested in: reviews and usefulness value
+data<-data.frame(doc_id=data$useful, text=data$text)
+#make this data into a dataframe
+data<-as.data.frame(data)
+```
+
+
+CORPUS CREATION
+```{r}
+#Create a dataframe source for the corpus: 1st col doc_id 2nd col text
+corpus <- DataframeSource(data)
+
+#Create a volatile corpus R object
+corpus <- VCorpus(corpus, readerControl = list(content="text", id="useful"))
+
+#how many values we have in the corpus
+length(corpus)
+
+#Access the info from the second review object within then corpus
+corpus[[2]]$content
+
+```
+
+
+CLEANING THE TEXT
+```{r}
+
+#remove unecessary content
+corpus.ng <- tm_map(corpus,removeWords,c(stopwords("en"),"i","we","was","were", "you", "see", "how", "each", "come", "back", "pretty", "when", "who", "your", "get", "because", "just", "gave", "going", "sure", "so", "what", "my", "have", "been", "yes", "s", "its", "can", "also", "food", "abc", "like", "since", "goes", "k", "will"))
+removeURL <- content_transformer(function(x) gsub("(f|ht)tp(s?)://\\S+", "", x, perl=T))
+corpus.ng <- tm_map(corpus.ng, removeURL)
+toSpace <- content_transformer(function (x , pattern ) gsub(pattern, " ", x))
+corpus.ng <- tm_map(corpus.ng, toSpace, "/")
+corpus.ng <- tm_map(corpus.ng, toSpace, "@")
+corpus.ng <- tm_map(corpus.ng, toSpace, "\\|")
+corpus.ng <- tm_map(corpus.ng, toSpace, "\n")
+corpus.ng <- tm_map(corpus.ng, toSpace, "abc")
+corpus.ng <- tm_map(corpus.ng, PlainTextDocument)  # needs to come before stemming
+corpus.ng <- tm_map(corpus.ng, stemDocument)
+corpus.ng <- tm_map(corpus.ng,removePunctuation)
+corpus.ng <- tm_map(corpus.ng,removeNumbers)
+#Turn everything to lower case
+corpus.ng <- tm_map(corpus.ng, content_transformer(tolower))
+corpus.ng = tm_map(corpus.ng, removeWords, stopwords("en")) 
+head(lapply(corpus.ng, as.character))
+length(corpus.ng)
+```
+
+DOCUMENT TERM MATRIX
+```{r}
+
+#Create a Document term matrix
+dtm<-DocumentTermMatrix(corpus.ng)
+
+#get the frequency from the DTM
+freq1 <- colSums(as.matrix(dtm))
+
+#Sort Frequency en decending order
+freq <- sort(freq1, decreasing=TRUE)   
+
+#Dataframe with words and their frequencies
+wf <- data.frame(word=names(freq), freq=freq)   
+
+```
+
+PLOT THE FREQUENCIES
+```{r}
+p <- ggplot(subset(wf, freq>50), aes(x = reorder(word, -freq), y = freq)) +
+          geom_bar(stat = "identity", fill = "blue") + 
+          theme(axis.text.x=element_text(angle=30, hjust=1)) + xlab("Terms") + ylab("Frequency") +
+  ggtitle("Term Frequency Plot") + theme(axis.text.x=element_text(angle=30, hjust=1))
+p  
+```
+
+
+WORD CLOUD
+```{r}
+set.seed(142)   
+wordcloud(names(freq), freq, min.freq=20, scale=c(5, .1), colors=brewer.pal(6, "Dark2"))   
+```
+
+TFIDF Analysis
+sources: https://rstudio-pubs-static.s3.amazonaws.com/118341_dacd8e7a963745eeacf25f96da52770e.html
+https://ethen8181.github.io/machine-learning/clustering_old/tf_idf/tf_idf.html
+
+```{r}
+#Term document matrix for TF-IDF
+tdm = TermDocumentMatrix(corpus.ng)
+
+#Check to see how it looks
+tf <- as.matrix(tdm) #terms are rows, columns are documents
+
+#Total frequency of each term
+freq=rowSums(as.matrix(tdm))
+
+#Calculate IDF values
+idf <- log( ncol(tf) / ( 1 + rowSums(tf != 0) ) ) 
+
+#Set up matrix multiplication for TF-IDF
+idf <- diag(idf)
+
+#Create TF-IDF
+tf_idf0 <- crossprod(tf, idf)
+colnames(tf_idf0) <- rownames(tf)
+
+# Note that normalization is computed "row-wise". Normalization to reduce document length bias
+tf_idf <- tf_idf0 / sqrt( rowSums( tf_idf0^2 ) )
+
+#Get the frequencies
+tfidffreq <- colSums(tf_idf)
+
+Mango <- data.frame(word=names(tfidffreq), tfidffreq=tfidffreq)
+
+high.freq=tail(sort(tfidffreq),n=20)
+hfp.df=as.data.frame(sort(high.freq))
+hfp.df$names <- rownames(hfp.df) 
+
+ggplot(hfp.df, aes(reorder(names,-high.freq), high.freq)) +
+  geom_bar(stat="identity", fill = "blue") + 
+  xlab("Terms") + ylab("Weight") +
+  ggtitle("Term Weight Plot - Useful rating") + theme(axis.text.x=element_text(angle=30, hjust=1))
+
+```
+
+Plot the TF-IDF curve
+```{r}
+plot(sort(tfidffreq, decreasing = T),col="blue",main="Word TF-IDF frequencies", xlab="TF-IDF-based rank", ylab = "TF-IDF")
+```
+
+UPDATED BAR CHART
+```{r}
+#Before merging take the 50 highest frequencies
+#Get the not normalized frequencies tfidf
+tfidffreq <- colSums(tf_idf)
+high.tfidffreq=tail(sort(tfidffreq),n=20)
+hftfidf.df=as.data.frame(sort(high.tfidffreq))
+hftfidf.df$names <- rownames(hftfidf.df) 
+#Change the row name
+colnames(hftfidf.df)[1]<-"TF-IDF"
+#Change the scale of TF-IDF
+maxVal<-max(hftfidf.df$`TF-IDF`)
+hftfidf.df$`TF-IDF`<-(hftfidf.df$`TF-IDF`)/maxVal
+
+#get the frequency from the DTM
+freq1 <- colSums(as.matrix(dtm))
+high.freq=tail(sort(freq1),n=20)
+hfp.df=as.data.frame(sort(high.freq))
+hfp.df$names <- rownames(hfp.df) 
+#Change the row name
+colnames(hfp.df)[1]<-"Term-Frequency"
+#Change the scale of TF-IDF
+maxVal<-max(hfp.df$`Term-Frequency`)
+hfp.df$`Term-Frequency`<-(hfp.df$`Term-Frequency`)/maxVal
+
+
+#merge the 2 data frames Mango and wf
+BigWf <- merge(hftfidf.df, hfp.df, by.x="names", by.y="names")
+
+#Sort the data again
+BigWf <- BigWf[order(-BigWf$`TF-IDF`),]
+
+#Plot bar Chart
+library(reshape2)
+BigWf <- melt(BigWf)
+
+#reorder the data frame for a ordered graph
+
+ggplot(BigWf, aes(reorder(names,as.numeric(row.names(BigWf))),value, fill = variable)) +
+  geom_bar(stat="identity", width=.5, position = "dodge") + 
+  xlab("Terms") + ylab("Weight") +
+  ggtitle("Term Weight Plot") + theme(axis.text.x=element_text(angle=30, hjust=1))
+
+```
+
+
+
+
+
